@@ -1,0 +1,14 @@
+{
+  "name": "seanchang-plugins",
+  "owner": {
+    "name": "Sean Chang",
+    "email": "changsean1234@gmail.com"
+  },
+  "plugins": [
+    {
+      "name": "voice-talk",
+      "source": "./",
+      "description": "Hands-free conversation mode for Claude Code on macOS. /talk toggles an always-on listen-and-speak loop in the current session."
+    }
+  ]
+}

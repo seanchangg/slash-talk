@@ -1,0 +1,10 @@
+{
+  "name": "voice-talk",
+  "description": "Hands-free conversation mode for Claude Code on macOS. /talk toggles an always-on listen-and-speak loop in the current session.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Sean Chang",
+    "email": "changsean1234@gmail.com"
+  },
+  "keywords": ["voice", "speech", "hands-free", "dictation", "macos"]
+}
