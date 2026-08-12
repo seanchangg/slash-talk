@@ -34,13 +34,14 @@ STATE_DIR = os.path.join(HOME, ".claude/voice-talk")
 def pick_voice():
     """Use the best installed voice: a premium one if present, else Samantha."""
     override = os.environ.get("CLAUDE_SPEAK_VOICE")
-    if override:
+    if override and override != "personal":
         return override
     try:
         proc = subprocess.run(["/usr/bin/say", "-v", "?"],
                               capture_output=True, timeout=10)
         installed = proc.stdout.decode(errors="replace")
-        for name in ("Ava (Premium)", "Ava (Enhanced)", "Ava",
+        for name in ("Lee (Premium)", "Lee (Enhanced)",
+                     "Ava (Premium)", "Ava (Enhanced)", "Ava",
                      "Evan (Enhanced)", "Zoe (Premium)", "Allison"):
             if re.search(rf"^{re.escape(name)} +en", installed, re.MULTILINE):
                 return name
@@ -193,7 +194,6 @@ def to_speech(text):
 
 
 PVSAY = os.path.join(STATE_DIR, "bin/pvsay")
-PVSAY_OK = os.path.join(STATE_DIR, "pvsay-ok")
 
 
 def speak(text, wait):
@@ -202,10 +202,9 @@ def speak(text, wait):
     subprocess.run(["/usr/bin/pkill", "-x", "pvsay"], capture_output=True)
     if not text:
         return
-    # The user's Personal Voice wins when it is compiled and verified,
-    # unless CLAUDE_SPEAK_VOICE explicitly picks a system voice.
-    if (not os.environ.get("CLAUDE_SPEAK_VOICE")
-            and os.path.exists(PVSAY) and os.path.exists(PVSAY_OK)):
+    # The user's Personal Voice is opt-in: set CLAUDE_SPEAK_VOICE=personal.
+    if (os.environ.get("CLAUDE_SPEAK_VOICE") == "personal"
+            and os.path.exists(PVSAY)):
         args = [PVSAY, "-r", RATE, text]
     else:
         if VOICE is None:

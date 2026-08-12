@@ -65,11 +65,6 @@ on() {
     echo "Missing:$MISSING. Run /talk setup first."
     exit 1
   fi
-  if [ -x "$STATE_DIR/bin/pvsay" ] && "$STATE_DIR/bin/pvsay" --check >/dev/null 2>&1; then
-    touch "$STATE_DIR/pvsay-ok"
-  else
-    rm -f "$STATE_DIR/pvsay-ok"
-  fi
   echo "$SID" > "$MODE_FILE"
   echo "Conversation mode is ON for this session."
   echo "After this reply is spoken, the microphone opens (a tink sound marks it)."
