@@ -9,7 +9,7 @@ the same session, and the loop repeats. You do not touch the keyboard.
 ## Install
 
 ```
-/plugin marketplace add <your-github-user>/claude-voice-talk
+/plugin marketplace add seanchangg/slash-talk
 /plugin install voice-talk@seanchang-plugins
 /talk setup
 ```
