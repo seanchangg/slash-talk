@@ -404,15 +404,15 @@ def main():
     log(f"stop hook: session={session_id[:8]} conversing={conversing} "
         f"stop_hook_active={payload.get('stop_hook_active')}")
 
+    # Speech only happens in conversation mode. Other sessions stay silent.
+    if not conversing:
+        return 0
+
     speech = ""
     if transcript_path and not os.path.exists(MUTE_FILE):
         speech = to_speech(fresh_assistant_text(transcript_path, session_id))
         if len(speech) > MAX_CHARS:
             speech = speech[:MAX_CHARS].rsplit(" ", 1)[0] + ", and more on screen."
-
-    if not conversing:
-        speak(speech, wait=False)
-        return 0
 
     speak(speech, wait=True)
     text = listen_turn(session_id)
