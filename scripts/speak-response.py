@@ -29,7 +29,27 @@ import time
 
 HOME = os.path.expanduser("~")
 STATE_DIR = os.path.join(HOME, ".claude/voice-talk")
-VOICE = os.environ.get("CLAUDE_SPEAK_VOICE", "Samantha")
+
+
+def pick_voice():
+    """Use the best installed voice: a premium one if present, else Samantha."""
+    override = os.environ.get("CLAUDE_SPEAK_VOICE")
+    if override:
+        return override
+    try:
+        proc = subprocess.run(["/usr/bin/say", "-v", "?"],
+                              capture_output=True, timeout=10)
+        installed = proc.stdout.decode(errors="replace")
+        for name in ("Ava (Premium)", "Ava (Enhanced)", "Ava",
+                     "Evan (Enhanced)", "Zoe (Premium)", "Allison"):
+            if re.search(rf"^{re.escape(name)} +en", installed, re.MULTILINE):
+                return name
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return "Samantha"
+
+
+VOICE = None  # resolved on first speak
 RATE = os.environ.get("CLAUDE_SPEAK_RATE", "195")
 MAX_CHARS = int(os.environ.get("CLAUDE_SPEAK_MAX_CHARS", "1200"))
 MUTE_FILE = os.path.join(STATE_DIR, "mute")
@@ -173,9 +193,12 @@ def to_speech(text):
 
 
 def speak(text, wait):
+    global VOICE
     subprocess.run(["/usr/bin/pkill", "-x", "say"], capture_output=True)
     if not text:
         return
+    if VOICE is None:
+        VOICE = pick_voice()
     args = ["/usr/bin/say", "-v", VOICE, "-r", RATE, text]
     if wait:
         subprocess.run(args, capture_output=True)
@@ -200,20 +223,32 @@ def mode_off():
         pass
 
 
-def record(path):
-    """Record one utterance. Return True if the file has audio."""
+def record(path, cue=False):
+    """Record one utterance. Return True if the file has audio.
+
+    With cue=True, play the tink only after the recorder has had time to
+    open the microphone, so the first words are not clipped. macOS echo
+    cancellation keeps the tink itself out of the recording.
+    """
+    proc = subprocess.Popen(
+        [REC, "-q", "-c", "1", "-r", "16000", "-b", "16", path,
+         "silence", "1", "0.1", "3%", "1", "1.5", "3%"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    if cue:
+        time.sleep(0.6)
+        if proc.poll() is None and os.path.exists(CUE):
+            subprocess.run(["/usr/bin/afplay", CUE], capture_output=True)
+        log("mic open")
     try:
-        proc = subprocess.run(
-            [REC, "-q", "-c", "1", "-r", "16000", "-b", "16", path,
-             "silence", "1", "0.1", "3%", "1", "1.5", "3%"],
-            capture_output=True, timeout=600,
-        )
+        _, err = proc.communicate(timeout=600)
     except subprocess.TimeoutExpired:
+        proc.kill()
         log("rec hit the 10 minute cap")
         return False
     if proc.returncode != 0:
         log(f"rec exit {proc.returncode}: "
-            f"{proc.stderr.decode(errors='replace').strip()[:200]}")
+            f"{err.decode(errors='replace').strip()[:200]}")
         return False
     return os.path.exists(path) and os.path.getsize(path) > 16000  # >0.5s
 
@@ -284,10 +319,7 @@ def listen_turn(session_id):
         )
         return None
 
-    if os.path.exists(CUE):
-        subprocess.run(["/usr/bin/afplay", CUE], capture_output=True)
-    log("mic open")
-
+    first = True
     while True:
         if not mode_is_on(session_id):
             log("mode file gone, stop listening")
@@ -295,7 +327,8 @@ def listen_turn(session_id):
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
             wav = f.name
         try:
-            ok = record(wav)
+            ok = record(wav, cue=first)
+            first = False
             if not ok:
                 log("recording failed or too short")
                 # The mic failed or /talk off killed the recorder.
