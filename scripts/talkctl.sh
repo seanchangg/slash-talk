@@ -44,6 +44,14 @@ setup() {
     mkdir -p "$STATE_DIR/models"
     curl -sL -o "$MODEL" "$MODEL_URL" || { echo "The model download failed."; exit 1; }
   fi
+  SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+  if command -v swiftc >/dev/null 2>&1 && [ ! -x "$STATE_DIR/bin/pvsay" ]; then
+    echo "Compiling the Personal Voice speaker..."
+    mkdir -p "$STATE_DIR/bin"
+    swiftc -O -o "$STATE_DIR/bin/pvsay" "$SCRIPT_DIR/pvsay.swift" 2>/dev/null \
+      && echo "Personal Voice support is ready. Claude will use your Personal Voice if you made one." \
+      || echo "The Personal Voice compile failed. Claude will use a system voice."
+  fi
   echo "Setup is complete. Run /talk to start conversation mode."
   echo "Note: the first listen will ask for microphone access for your terminal."
 }
@@ -56,6 +64,11 @@ on() {
   if deps_missing; then
     echo "Missing:$MISSING. Run /talk setup first."
     exit 1
+  fi
+  if [ -x "$STATE_DIR/bin/pvsay" ] && "$STATE_DIR/bin/pvsay" --check >/dev/null 2>&1; then
+    touch "$STATE_DIR/pvsay-ok"
+  else
+    rm -f "$STATE_DIR/pvsay-ok"
   fi
   echo "$SID" > "$MODE_FILE"
   echo "Conversation mode is ON for this session."

@@ -192,14 +192,25 @@ def to_speech(text):
     return text.strip()
 
 
+PVSAY = os.path.join(STATE_DIR, "bin/pvsay")
+PVSAY_OK = os.path.join(STATE_DIR, "pvsay-ok")
+
+
 def speak(text, wait):
     global VOICE
     subprocess.run(["/usr/bin/pkill", "-x", "say"], capture_output=True)
+    subprocess.run(["/usr/bin/pkill", "-x", "pvsay"], capture_output=True)
     if not text:
         return
-    if VOICE is None:
-        VOICE = pick_voice()
-    args = ["/usr/bin/say", "-v", VOICE, "-r", RATE, text]
+    # The user's Personal Voice wins when it is compiled and verified,
+    # unless CLAUDE_SPEAK_VOICE explicitly picks a system voice.
+    if (not os.environ.get("CLAUDE_SPEAK_VOICE")
+            and os.path.exists(PVSAY) and os.path.exists(PVSAY_OK)):
+        args = [PVSAY, "-r", RATE, text]
+    else:
+        if VOICE is None:
+            VOICE = pick_voice()
+        args = ["/usr/bin/say", "-v", VOICE, "-r", RATE, text]
     if wait:
         subprocess.run(args, capture_output=True)
     else:
