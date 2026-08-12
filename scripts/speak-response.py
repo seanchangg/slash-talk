@@ -96,6 +96,12 @@ def last_assistant_text(transcript_path):
     text, uid, ts = "", "", 0.0
     try:
         with open(transcript_path, "r", encoding="utf-8", errors="replace") as fh:
+            # The transcript grows without bound; the newest messages are
+            # at the end. Read only the last 512 KB.
+            size = os.fstat(fh.fileno()).st_size
+            if size > 524288:
+                fh.seek(size - 524288)
+                fh.readline()  # drop the partial line
             for line in fh:
                 try:
                     entry = json.loads(line)
@@ -246,7 +252,7 @@ def record(path, cue=False):
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
     if cue:
-        time.sleep(0.6)
+        time.sleep(0.8)
         if proc.poll() is None and os.path.exists(CUE):
             subprocess.run(["/usr/bin/afplay", CUE], capture_output=True)
         log("mic open")
@@ -263,12 +269,22 @@ def record(path, cue=False):
     return os.path.exists(path) and os.path.getsize(path) > 16000  # >0.5s
 
 
+MIC_OK_CACHE = os.path.join(STATE_DIR, "mic-ok")
+
+
 def mic_ok():
     """Record half a second and check for a live signal.
 
     A microphone that macOS blocks records digital silence (~0.00003 peak).
     A real microphone in a quiet room still has a noise floor above that.
+    A pass is cached for an hour, because the check itself costs a full
+    open-and-close cycle on the audio device before every listen.
     """
+    try:
+        if time.time() - os.path.getmtime(MIC_OK_CACHE) < 3600:
+            return True
+    except OSError:
+        pass
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
         wav = f.name
     try:
@@ -284,7 +300,11 @@ def mic_ok():
                       stat.stderr.decode(errors="replace"))
         peak = float(m.group(1)) if m else 0.0
         log(f"mic_ok peak={peak}")
-        return peak > 0.0003
+        if peak > 0.0003:
+            with open(MIC_OK_CACHE, "w"):
+                pass
+            return True
+        return False
     except subprocess.TimeoutExpired:
         log("mic_ok timed out")
         return False
@@ -309,6 +329,10 @@ def listen_turn(session_id):
     fake = os.environ.get("CLAUDE_VOICE_FAKE_TEXT")
     if fake:
         return fake
+
+    # An interrupted hook can leave its recorder behind, and a stale
+    # recorder holds the audio device open. Clear them first.
+    subprocess.run(["/usr/bin/pkill", "-f", "bin/rec"], capture_output=True)
 
     if not (REC and SOX and WHISPER and os.path.exists(MODEL)):
         mode_off()
