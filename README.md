@@ -1,6 +1,6 @@
 # voice-talk
 
-Hands-free conversation mode for Claude Code on macOS.
+Hands-free conversation mode for Claude Code on macOS. Built so I could micromanage my UI as I was cooking dinner.
 
 `/talk` turns the current session into a voice conversation. Claude speaks
 each reply. Then the microphone opens, your words become the next prompt in
