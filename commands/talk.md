@@ -16,6 +16,7 @@ Usage:
 - `/talk on`, `/talk off` — set it directly.
 - `/talk setup` — install SoX, whisper-cpp, and the speech model.
 - `/talk status` — show the state.
+- `/talk key <FISH_API_KEY>` — speak with Fish Audio instead of macOS say.
 
 In conversation mode, every reply is spoken. Then the microphone opens
 (after a tink sound), your words go into this same session, and the loop

@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Voice output and conversation mode for Claude Code (voice-talk plugin).
 
-This script runs as a Stop hook on macOS. It speaks the last reply with the
-`say` command.
+This script runs as a Stop hook on macOS. It speaks the last reply with
+the first engine that is ready: Kokoro (local, installed by /talk setup),
+Fish Audio (needs an API key), or the macOS `say` command.
+CLAUDE_SPEAK_ENGINE=kokoro|fish|say|personal forces one engine.
 
 If conversation mode is on for this session (~/.claude/voice-talk/mode holds
 this session's ID), the hook then keeps the turn going:
@@ -16,16 +18,28 @@ this session's ID), the hook then keeps the turn going:
 Say "stop listening" to end the mode. /talk off also ends it.
 Press Esc to interrupt a listening hook without ending the mode.
 Mute the speech only: touch ~/.claude/voice-talk/mute
+
+Kokoro runs as a small server (kokoro-server.py) that keeps the model
+loaded. This hook starts it when needed. CLAUDE_SPEAK_KOKORO_VOICE picks
+the voice (default af_heart). CLAUDE_SPEAK_KOKORO_SPEED sets the speed.
+
+Fish Audio setup: put the API key in $FISH_API_KEY, or write it to
+~/.claude/voice-talk/fish-key. Pick a voice with CLAUDE_SPEAK_FISH_VOICE
+(the ID from a fish.audio/m/<id> page). If an engine fails, the hook
+logs the reason and tries the next one.
 """
 
 import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
+import urllib.request
 
 HOME = os.path.expanduser("~")
 STATE_DIR = os.path.join(HOME, ".claude/voice-talk")
@@ -201,16 +215,187 @@ def to_speech(text):
 
 PVSAY = os.path.join(STATE_DIR, "bin/pvsay")
 
+FISH_URL = os.environ.get("CLAUDE_SPEAK_FISH_URL", "https://api.fish.audio/v1/tts")
+FISH_KEY_FILE = os.path.join(STATE_DIR, "fish-key")
+FISH_MODEL = os.environ.get("CLAUDE_SPEAK_FISH_MODEL", "s2.1-pro")
+FISH_VOICE = os.environ.get("CLAUDE_SPEAK_FISH_VOICE", "")
+FISH_SPEED = os.environ.get("CLAUDE_SPEAK_FISH_SPEED", "1.0")
+FISH_AUDIO = os.path.join(STATE_DIR, "speech.mp3")
+
+
+def fish_key():
+    """Return the Fish Audio API key, or an empty string."""
+    key = os.environ.get("FISH_API_KEY") or os.environ.get("FISH_AUDIO_API_KEY")
+    if key:
+        return key.strip()
+    try:
+        with open(FISH_KEY_FILE) as fh:
+            return fh.read().strip()
+    except OSError:
+        return ""
+
+
+def fish_synthesize(text, key):
+    """Ask Fish Audio for MP3 audio. Return the path, or None on failure."""
+    body = {
+        "text": text,
+        "format": "mp3",
+        "latency": "balanced",
+    }
+    if FISH_VOICE:
+        body["reference_id"] = FISH_VOICE
+    try:
+        speed = float(FISH_SPEED)
+    except ValueError:
+        speed = 1.0
+    if abs(speed - 1.0) > 0.01:
+        body["prosody"] = {"speed": max(0.5, min(2.0, speed))}
+    req = urllib.request.Request(
+        FISH_URL,
+        data=json.dumps(body).encode("utf-8"),
+        method="POST",
+        headers={
+            "Authorization": "Bearer " + key,
+            "Content-Type": "application/json",
+            "model": FISH_MODEL,
+        },
+    )
+    started = time.time()
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            audio = resp.read()
+    except urllib.error.HTTPError as err:
+        detail = err.read().decode(errors="replace")[:200]
+        log(f"fish tts http {err.code}: {detail}")
+        return None
+    except (urllib.error.URLError, OSError, TimeoutError) as err:
+        log(f"fish tts failed: {err}")
+        return None
+    if len(audio) < 100:
+        log("fish tts returned no audio")
+        return None
+    try:
+        with open(FISH_AUDIO, "wb") as fh:
+            fh.write(audio)
+    except OSError as err:
+        log(f"fish tts write failed: {err}")
+        return None
+    log(f"fish tts ok: {len(audio)} bytes in {time.time() - started:.1f}s")
+    return FISH_AUDIO
+
+
+KOKORO_SOCK = os.path.join(STATE_DIR, "kokoro.sock")
+KOKORO_PYTHON = os.path.join(STATE_DIR, "kokoro-venv/bin/python")
+KOKORO_SERVER = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "kokoro-server.py")
+KOKORO_MODEL = os.path.join(STATE_DIR, "models/kokoro-v1.0.onnx")
+KOKORO_VOICE = os.environ.get("CLAUDE_SPEAK_KOKORO_VOICE", "af_heart")
+KOKORO_SPEED = os.environ.get("CLAUDE_SPEAK_KOKORO_SPEED", "1.0")
+ENGINE = os.environ.get("CLAUDE_SPEAK_ENGINE", "auto")
+
+
+def kokoro_installed():
+    return os.path.exists(KOKORO_PYTHON) and os.path.exists(KOKORO_MODEL)
+
+
+def kokoro_request(req, timeout):
+    """Send one request to the Kokoro server. Return its reply, or None."""
+    conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        conn.settimeout(timeout)
+        conn.connect(KOKORO_SOCK)
+        conn.sendall(json.dumps(req).encode("utf-8") + b"\n")
+        buf = b""
+        while not buf.endswith(b"\n"):
+            chunk = conn.recv(4096)
+            if not chunk:
+                break
+            buf += chunk
+        return buf.decode(errors="replace").strip() or None
+    except (OSError, socket.timeout):
+        return None
+    finally:
+        conn.close()
+
+
+def kokoro_start():
+    """Start the Kokoro server and wait until it answers. Return True if up."""
+    if kokoro_request({"ping": True}, 2) == "ready":
+        return True
+    if not kokoro_installed():
+        return False
+    log("starting the kokoro server")
+    with open(os.devnull, "wb") as null:
+        subprocess.Popen([KOKORO_PYTHON, "-I", KOKORO_SERVER],
+                         stdout=null, stderr=null, stdin=null,
+                         start_new_session=True)
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        time.sleep(0.25)
+        if kokoro_request({"ping": True}, 2) == "ready":
+            return True
+    log("the kokoro server did not start")
+    return False
+
+
+def speak_kokoro(text):
+    """Speak with the local Kokoro server. Return False to fall back."""
+    if not kokoro_start():
+        return False
+    try:
+        speed = float(KOKORO_SPEED)
+    except ValueError:
+        speed = 1.0
+    started = time.time()
+    reply = kokoro_request(
+        {"text": text, "voice": KOKORO_VOICE, "speed": speed}, 600)
+    log(f"kokoro {reply}: {len(text)} chars in {time.time() - started:.1f}s")
+    return reply in ("done", "stopped")
+
+
+def speak_fish(text, key):
+    """Speak with Fish Audio. Return False so the caller can fall back."""
+    path = fish_synthesize(text, key)
+    if not path:
+        return False
+    subprocess.run(["/usr/bin/afplay", path], capture_output=True)
+    return True
+
 
 def speak(text, wait):
     global VOICE
     subprocess.run(["/usr/bin/pkill", "-x", "say"], capture_output=True)
     subprocess.run(["/usr/bin/pkill", "-x", "pvsay"], capture_output=True)
+    subprocess.run(["/usr/bin/pkill", "-f", FISH_AUDIO], capture_output=True)
+    kokoro_request({"stop": True}, 1)
     if not text:
         return
-    # The user's Personal Voice is opt-in: set CLAUDE_SPEAK_VOICE=personal.
-    if (os.environ.get("CLAUDE_SPEAK_VOICE") == "personal"
-            and os.path.exists(PVSAY)):
+    engine = ENGINE
+    if engine == "auto" and os.environ.get("CLAUDE_SPEAK_VOICE") == "personal":
+        engine = "personal"
+    key = fish_key()
+    if engine == "auto":
+        if kokoro_installed():
+            engine = "kokoro"
+        elif key:
+            engine = "fish"
+        else:
+            engine = "say"
+    if engine in ("kokoro", "fish"):
+        if not wait:
+            # Run this script again in the background so the hook can exit.
+            with open(os.devnull, "wb") as null:
+                subprocess.Popen([sys.executable, __file__, "--say", text],
+                                 stdout=null, stderr=null, stdin=null,
+                                 start_new_session=True)
+            return
+        if engine == "kokoro" and speak_kokoro(text):
+            return
+        if engine == "fish" and key and speak_fish(text, key):
+            return
+        log(f"{engine} failed, falling back to say")
+    # The user's Personal Voice is opt-in: CLAUDE_SPEAK_ENGINE=personal.
+    if engine == "personal" and os.path.exists(PVSAY):
         args = [PVSAY, "-r", RATE, text]
     else:
         if VOICE is None:
@@ -392,6 +577,10 @@ def main():
     if sys.platform != "darwin" or not os.path.exists("/usr/bin/say"):
         return 0
     os.makedirs(STATE_DIR, exist_ok=True)
+
+    if len(sys.argv) >= 3 and sys.argv[1] == "--say":
+        speak(" ".join(sys.argv[2:]), wait=True)
+        return 0
 
     try:
         payload = json.load(sys.stdin)
